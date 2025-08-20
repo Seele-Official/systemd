@@ -23,7 +23,7 @@ static STOP_TOKEN: AtomicBool = AtomicBool::new(false);
 
 pub fn stop() {
     STOP_TOKEN.store(true, Ordering::Relaxed);
-    log::info!("{}", client::run(&Cli::parse()));
+    log::info!("The closing message `{}`", client::run(&Cli::parse()));
 
     let mut handle_guard = WORKER_THREAD.lock().unwrap();
     if let Some(handle) = handle_guard.take() {
@@ -52,7 +52,7 @@ pub fn run() {
                     );
 
                     if pipe_hdl.is_invalid() {
-                        eprintln!("Failed to create named pipe server instance. Error: {:?}", Win32Foundation::GetLastError());
+                        log::error!("Failed to create named pipe server instance. Error: {:?}", Win32Foundation::GetLastError());
                         break;
                     }
 
@@ -74,7 +74,7 @@ pub fn run() {
                     Win32Foundation::CloseHandle(pipe_hdl).ok();  
                 }
             }
-            println!("Worker thread stopped.");
+            log::info!("Worker thread stopped.");
         });
         *handle_guard = Some(handle);
     }
@@ -119,10 +119,10 @@ unsafe {
 
                             let mut ret = String::new();
 
-                            ret.push_str(&format!("{} - {}\n", name, cfg.unit.description.unwrap_or("Not provided".to_string())));
+                            ret.push_str(&format!("{} - {}\n\n", name, cfg.unit.description.unwrap_or("Not provided description".to_string())));
 
                             ret.push_str(&format!("{:<7}:{:?} \n", "Type", cfg.service.style));
-                            ret.push_str(&format!("{:<7}:{} \n", "Status", 
+                            ret.push_str(&format!("{:<7}:{}", "Status", 
                                 match process::check(name) {
                                     Ok(_) => format!("Running"),
                                     Err(e) => format!("{:?}", e)

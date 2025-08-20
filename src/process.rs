@@ -14,12 +14,12 @@ pub enum Error {
     ProcessNotFound,
     ProcessAlreadyRunning,
     ProcessExited(u32),
-    IoError(io::Error),
+    Io(io::Error),
 }
 
 impl From<io::Error> for Error {
     fn from(err: io::Error) -> Self {
-        Error::IoError(err)
+        Error::Io(err)
     }
     
 }
@@ -27,7 +27,7 @@ impl From<io::Error> for Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Error::IoError(e) => write!(f, "IoError({})", e),
+            Error::Io(e) => write!(f, "IoError({})", e),
             Error::ProcessNotFound => write!(f, "ProcessNotFound"),
             Error::ProcessExited(code) => write!(f, "ProcessExited({})", code),
             Error::ProcessAlreadyRunning => write!(f, "ProcessAlreadyRunning"),
@@ -50,7 +50,7 @@ pub fn spawn(name: &str, service: &Service) -> Result<(), Error> {
     let log_path = std::env::current_exe()?
         .parent()
         .ok_or_else(|| {
-            io::Error::new(io::ErrorKind::NotFound, "Could not find parent directory")
+            io::Error::new(io::ErrorKind::NotFound, "Could not find parent directory of current_exe")
         })?
         .join("log");
     
@@ -104,13 +104,13 @@ pub fn check(name: &str) -> Result<(), Error> {
     get_mut(name, |child| {
         match child.try_wait() {
             Ok(Some(status)) => {
-                Err(Error::ProcessExited(status.code().unwrap_or(1) as u32))
+                Err(Error::ProcessExited(status.code().unwrap_or(i32::MIN) as u32))
             }
             Ok(None) => {
                 Ok(())
             }
             Err(e) => {
-                Err(Error::IoError(e))
+                Err(Error::Io(e))
             }
         }
 

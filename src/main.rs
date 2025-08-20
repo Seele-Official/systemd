@@ -6,6 +6,7 @@ mod client;
 
 use std::{
     fs,
+    fmt::Display,
     thread::sleep,
     time::{Duration, Instant},
     ffi::{c_void, OsStr, OsString},
@@ -86,12 +87,47 @@ enum Commands {
 
 }
 
+#[derive(Debug)]
+enum Error {
+    WinService(windows_service::Error),
+    Win32(windows::core::Error),
+    Io(std::io::Error),
+    String(String),
+}
 
+impl From<windows_service::Error> for Error {
+    fn from(e: windows_service::Error) -> Self {
+        Error::WinService(e)
+    }
+}
 
+impl From<windows::core::Error> for Error {
+    fn from(e: windows::core::Error) -> Self {
+        Error::Win32(e)
+    }
+}
+
+impl From<std::io::Error> for Error {
+    fn from(e: std::io::Error) -> Self {
+        Error::Io(e)
+    }
+}
+
+impl Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Error::WinService(e) => write!(f, "Windows Service Error: {}", e),
+            Error::Win32(e) => write!(f, "Windows API Error: {}", e),
+            Error::Io(e) => write!(f, "IO Error: {}", e),
+            Error::String(s) => write!(f, "Error: {}", s),
+        }
+    }
+    
+}
+
+type Result<T> = std::result::Result<T, Error>;
 
 const APP_NAME: &str = "Systemd";
-
-
 
 const MUTEX_NAME_WIDE: PCWSTR = w!(r"Global\__{A7A4E39C-1F27-4A55-9C21-6831614E9461}__");
 
@@ -113,10 +149,10 @@ fn main() {
         println!("{:?}", stop());
         return;
     } else if cli.install {
-        print!("{:?}", install());
+        println!("{:?}", install());
         return;
     } else if cli.uninstall {
-        print!("{:?}", uninstall());
+        println!("{:?}", uninstall());
         return;
     }
 
@@ -144,7 +180,7 @@ fn main() {
     }
 }
 
-fn setup_logger() -> Result<(), fern::InitError> {
+fn setup_logger() -> Result<()> {
     fern::Dispatch::new()
         .format(|out, message, record| {
             out.finish(format_args!(
@@ -159,7 +195,9 @@ fn setup_logger() -> Result<(), fern::InitError> {
         .chain(
             fern::log_file(std::env::current_exe()?
                 .with_file_name(format!("{}.log", APP_NAME)))?
-        ).apply()?;
+        ).apply().map_err(|e| {
+            Error::String(format!("Failed to setup logger: {}", e))
+        })?;
 
     Ok(())
 }
@@ -211,9 +249,10 @@ fn run_as_service(){
         let mut sd = Win32Security::SECURITY_DESCRIPTOR::default();
         let p_sd: Win32Security::PSECURITY_DESCRIPTOR = Win32Security::PSECURITY_DESCRIPTOR(&mut sd as *mut _ as *mut c_void);
 
-        if !Win32Security::InitializeSecurityDescriptor(p_sd, 1).is_ok() 
+        if !Win32Security::InitializeSecurityDescriptor(p_sd, 1).is_ok()
         || !Win32Security::SetSecurityDescriptorDacl(p_sd, true, None, false).is_ok(){
             log::info!("Security descriptor initialized and DACL set.");
+            return;
         }
 
         sa.nLength = std::mem::size_of::<Win32Security::SECURITY_ATTRIBUTES>() as u32;
@@ -254,12 +293,12 @@ define_windows_service!(ffi_service_main, service_main);
 fn service_main(arguments: Vec<std::ffi::OsString>) {
     log::info!("Service started with arguments: {:?}", arguments);
     if let Err(e) = run_service() {
-        log::error!("Service failed: {:?}", e);
+        log::error!("Service failed: {}", e);
     }
 
 }
 
-fn start() -> windows_service::Result<()> {
+fn start() -> Result<()> {
     let manager_access = ServiceManagerAccess::CONNECT;
     let service_manager = ServiceManager::local_computer(None::<&str>, manager_access)?;
 
@@ -270,7 +309,7 @@ fn start() -> windows_service::Result<()> {
     Ok(())
 }
 
-fn stop() -> windows_service::Result<()> {
+fn stop() -> Result<()> {
 
     let manager_access = ServiceManagerAccess::CONNECT;
     let service_manager = ServiceManager::local_computer(None::<&str>, manager_access)?;
@@ -285,7 +324,7 @@ fn stop() -> windows_service::Result<()> {
     Ok(())
 }
 
-fn install() -> windows_service::Result<()> {
+fn install() -> Result<()> {
 
     let service_manager = ServiceManager::local_computer(
         None::<&str>, 
@@ -315,7 +354,7 @@ fn install() -> windows_service::Result<()> {
     Ok(())
 }
 
-fn uninstall() -> windows_service::Result<String> {
+fn uninstall() -> Result<String> {
     let manager_access = ServiceManagerAccess::CONNECT;
     let service_manager = ServiceManager::local_computer(None::<&str>, manager_access)?;
 
@@ -353,7 +392,7 @@ fn uninstall() -> windows_service::Result<String> {
 
 static STATUS_HDL: OnceCell<ServiceStatusHandle> = OnceCell::new();
 
-fn run_service() -> windows_service::Result<()> {
+fn run_service() ->  Result<()> {
 
     let event_handler = move |control_event| -> ServiceControlHandlerResult {
         match control_event {
@@ -368,7 +407,9 @@ fn run_service() -> windows_service::Result<()> {
                         checkpoint: 0,
                         wait_hint: Duration::default(),
                         process_id: None,
-                    }).ok();
+                    }).unwrap_or_else(|e| {
+                        log::error!("Failed to set service status: {:?}", e);
+                    });
                     log::info!("Service stopped successfully.");
                 } else {
                     log::info!("Service stopped, but status handle is missing.");

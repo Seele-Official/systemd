@@ -10,7 +10,12 @@ use crate::{PIPE_NAME_WIDE, Cli};
 
 pub fn run(cli: &Cli) -> String {
 
-    let msg = serde_json::to_string(&cli).unwrap();
+    let msg = match serde_json::to_string(&cli) {
+        Ok(msg) => msg,
+        Err(e) => {
+            return format!("Failed to serialize CLI message: {}", e);
+        }
+    };
     let in_buffer = msg.as_bytes();
 
     let mut response_buffer = [0u8; 1024];
