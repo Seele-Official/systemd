@@ -36,6 +36,7 @@ pub fn run() {
 
     if handle_guard.is_none() {
         let handle = thread::spawn(move || {
+            server_init();
             while !STOP_TOKEN.load(Ordering::Relaxed) {
                 unsafe {
 

@@ -53,7 +53,8 @@ pub fn spawn(name: &str, service: &Service) -> Result<(), Error> {
             io::Error::new(io::ErrorKind::NotFound, "Could not find parent directory")
         })?
         .join("log");
-
+    
+    fs::create_dir_all(&log_path)?;
 
     command.stdout(match &service.stdout_path {
         Some(stdout_path) => fs::File::create(stdout_path)?,

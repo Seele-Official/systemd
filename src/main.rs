@@ -47,11 +47,11 @@ struct Cli {
     uninstall: bool,
 
 
-    #[arg(short, long)]
+    #[arg(long)]
     #[doc = "Start the service"]
     start: bool,
 
-    #[arg(short, long)]
+    #[arg(long)]
     #[doc = "Stop the service"]
     stop: bool,
 
@@ -148,9 +148,11 @@ fn setup_logger() -> Result<(), fern::InitError> {
     fern::Dispatch::new()
         .format(|out, message, record| {
             out.finish(format_args!(
-                "[{}][{}] {}",
+                "[{}][{}][{}:{}] {}",
                 chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
                 record.level(),
+                record.file().unwrap_or_default(),
+                record.line().unwrap_or_default(),
                 message
             ))
         })
