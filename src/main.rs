@@ -2,17 +2,17 @@ mod config;
 mod process;
 mod server;
 mod client;
-
+mod pipe;
 
 use std::{
-    fs,
+    mem,
     fmt::Display,
-    thread::sleep,
+    thread::{self, sleep},
     time::{Duration, Instant},
     ffi::{c_void, OsStr, OsString},
 };
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ArgGroup};
 use serde::{Serialize, Deserialize};
 use once_cell::sync::OnceCell;
 use windows_service::{define_windows_service, service_dispatcher};
@@ -33,27 +33,56 @@ use windows_service::{
     service_control_handler::{self, ServiceControlHandlerResult, ServiceStatusHandle}
 };
 
-#[derive(Parser, Serialize, Deserialize, Debug)]
+#[derive(Parser, Serialize, Deserialize, Debug, Default)]
 #[command(version)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
+}
 
+#[derive(Parser, Serialize, Deserialize, Debug, Default, Clone)]
+#[command(group(
+    ArgGroup::new("service_actions")
+        .args([
+            "install",
+            "uninstall",
+            "register",
+            "unregister",
+            "start_service",
+            "stop_service",
+            "stop",
+            "run_as_service",
+            "run_as_user",
+        ])
+        .multiple(false)
+))]
+struct ManageOption {
     #[arg(short, long)]
-    #[doc = "Install the service to the system"]
+    #[doc = "Install the systemd to the windows service"]
     install: bool,
 
     #[arg(short, long)]
-    #[doc = "Uninstall the service from the system"]
+    #[doc = "Uninstall the systemd from the windows service"]
     uninstall: bool,
 
+    #[arg(long)]
+    #[doc = "Register the systemd to registry"]
+    register: bool,
 
     #[arg(long)]
-    #[doc = "Start the service"]
-    start: bool,
+    #[doc = "Unregister the systemd from registry"]
+    unregister: bool,
 
     #[arg(long)]
-    #[doc = "Stop the service"]
+    #[doc = "Start the installed service systemd"]
+    start_service: bool,
+
+    #[arg(long)]
+    #[doc = "Stop the installed service systemd"]
+    stop_service: bool,
+
+    #[arg(long)]
+    #[doc = "Stop systemd"]
     stop: bool,
 
     #[arg(long)]
@@ -64,8 +93,10 @@ struct Cli {
 }
 
 
-#[derive(Subcommand, Serialize, Deserialize, Debug)]
+#[derive(Subcommand, Serialize, Deserialize, Debug, Clone)]
 enum Commands {
+    #[doc = "Manage systemd"]
+    Setting(ManageOption),
     #[doc = "Start a service"]
     Start {
         #[arg(index = 1)]
@@ -129,54 +160,108 @@ type Result<T> = std::result::Result<T, Error>;
 
 const APP_NAME: &str = "Systemd";
 
-const MUTEX_NAME_WIDE: PCWSTR = w!(r"Global\__{A7A4E39C-1F27-4A55-9C21-6831614E9461}__");
+const SERVICE_MUTEX_NAME_WIDE: PCWSTR = w!(r"Global\__{A7A4E39C-1F27-4A55-9C21-6831614E9461}__");
 
-const PIPE_NAME_WIDE: PCWSTR = w!(r"\\.\pipe\__{A7A4E39C-1F27-4A55-9C21-6831614E9461}__");
+const SERVICE_PIPE_NAME_WIDE: PCWSTR = w!(r"\\.\pipe\__{A7A4E39C-1F27-4A55-9C21-6831614E9461}__");
+
+const STOPPED_PIPE_NAME_WIDE: PCWSTR = w!(r"\\.\pipe\__{A7A4E39C-1F27-4A55-9C21-6831614E9461}__stopped");
+
+struct MutexGuard {
+    handle: Win32Foundation::HANDLE,
+    is_holding: bool,
+}
+
+impl MutexGuard {
+    fn new(attribute: Option<*const Win32Security::SECURITY_ATTRIBUTES>, owner: bool, name: PCWSTR) -> Result<Self> {
+        unsafe {
+            let mutex_hdl = Win32Threading::CreateMutexW(
+                attribute,
+                owner,
+                name,
+            )?;
+
+            if Win32Foundation::GetLastError() == Win32Foundation::ERROR_ALREADY_EXISTS {
+                Ok(Self {
+                    handle: mutex_hdl,
+                    is_holding: false,
+                })
+            } else {
+                Ok(Self {
+                    handle: mutex_hdl,
+                    is_holding: true,
+                })
+            }
+        }
+    }
+
+
+    fn is_holding(&self) -> bool {
+        self.is_holding
+    }
+
+}
+
+
+impl Drop for MutexGuard {
+    fn drop(&mut self) {
+        unsafe {
+            if self.is_holding {
+                Win32Threading::ReleaseMutex(self.handle).ok();
+            }
+            Win32Foundation::CloseHandle(self.handle).ok();
+        }
+    }
+    
+}
+
+
 
 
 fn main() {
+
     let cli = Cli::parse();
-    if cli.run_as_service {
-        run_as_service();
-        return;
-    } else if cli.run_as_user {
-        run_as_user();
-        return;
-    } else if cli.start {
-        println!("{:?}", start());
-        return;
-    } else if cli.stop {
-        println!("{:?}", stop());
-        return;
-    } else if cli.install {
-        println!("{:?}", install());
-        return;
-    } else if cli.uninstall {
-        println!("{:?}", uninstall());
-        return;
+
+    if let Some(command) = cli.command.clone() {
+        match command {
+            Commands::Setting(opt) => {
+                if opt.run_as_service {
+                    run_as_service();
+                    return;
+                } else if opt.run_as_user {
+                    run_as_user();
+                    return;
+                } else if opt.start_service {
+                    println!("{:?}", start_service());
+                    return;
+                } else if opt.stop_service {
+                    println!("{:?}", stop_service());
+                    return;
+                } else if opt.stop {
+                    println!("{:?}", stop());
+                    return;
+                } else if opt.install {
+                    println!("{:?}", install());
+                    return;
+                } else if opt.uninstall {
+                    println!("{:?}", uninstall());
+                    return;
+                }
+            },
+            _ => {}
+        }
     }
 
-    
-    unsafe {
-        match Win32Threading::CreateMutexW(
-            None,
-            true,
-            PCWSTR::from_raw(MUTEX_NAME_WIDE.as_ptr()),
-        ) {
-            Ok(mutex_hdl) => {
-                if Win32Foundation::GetLastError() == Win32Foundation::ERROR_ALREADY_EXISTS {
-                    println!("{}", client::run(&cli));
-                } else {
-                    eprintln!("Service is not running.");
-                    Win32Threading::ReleaseMutex(mutex_hdl).ok();
-                }
+    let mutex = 
+        MutexGuard::new(None, true, SERVICE_MUTEX_NAME_WIDE)
+            .unwrap_or_else(|e| {
+                eprintln!("Failed to create mutex: {}", e);
+                std::process::exit(1);
+            });
 
-                Win32Foundation::CloseHandle(mutex_hdl).ok();
-            }
-            Err(e) => {
-                eprintln!("Failed to create mutex: {:?}", e);
-            }
-        }
+    if mutex.is_holding() {
+        eprintln!("Service is not running.");
+    } else {
+        println!("{}", client::run(&cli));
     }
 }
 
@@ -202,44 +287,43 @@ fn setup_logger() -> Result<()> {
     Ok(())
 }
 
+
+fn wait_for_stop_signal() -> Result<()> {
+    pipe::listen(STOPPED_PIPE_NAME_WIDE, |recv| {
+        let msg = unsafe {String::from_utf8_unchecked(recv.to_vec())};
+        if msg == "stop" {
+            server::stop();
+            return b"Service stopped".to_vec();
+        }
+        b"Unknown command".to_vec()
+    })
+}
+
 fn run_as_user() {
     setup_logger().ok();
-    unsafe {
-        match Win32Threading::CreateMutexW(
-            None,
-            true,
-            PCWSTR::from_raw(MUTEX_NAME_WIDE.as_ptr()),
-        ) {
-            Ok(mutex_hdl) => {
-                if Win32Foundation::GetLastError() == Win32Foundation::ERROR_ALREADY_EXISTS {
-                    eprintln!("Service is already running.");
-                } else {
-                    server::run();
 
-                    loop {
-                        let mut input = String::new();
-                        std::io::stdin().read_line(&mut input).unwrap();
-                        let input = input.trim();
-
-                        match input {
-                            "exit" => {
-                                server::stop();
-                                break;
-                            },
-                            _ => eprintln!("Unknown command: {}", input),
-                        }
-                    }
-
-                    Win32Threading::ReleaseMutex(mutex_hdl).ok();
-                }
-
-                Win32Foundation::CloseHandle(mutex_hdl).ok();
+    let mutex =
+        match MutexGuard::new(None, true, SERVICE_MUTEX_NAME_WIDE) {
+            Ok(mutex) => mutex,
+            Err(e) => {
+                log::error!("Failed to create mutex: {:?}", e);
+                return;
+            }
+        };
+    if mutex.is_holding() {
+        server::run();
+        match wait_for_stop_signal() {
+            Ok(()) => {
+                log::info!("Received stop signal");
             }
             Err(e) => {
-                eprintln!("Failed to create mutex: {:?}", e);
+                log::error!("Failed to listen on stop signal pipe: {:?}", e);
             }
         }
+    } else {
+        log::error!("Service is already running.");
     }
+
 }
 fn run_as_service(){
     setup_logger().ok();
@@ -259,26 +343,20 @@ fn run_as_service(){
         sa.lpSecurityDescriptor = &mut sd as *mut _ as *mut _;
         sa.bInheritHandle = Win32Foundation::FALSE;
 
-
-
-        match Win32Threading::CreateMutexW(
-            Some(&sa),
-            true,
-            PCWSTR::from_raw(MUTEX_NAME_WIDE.as_ptr()),
-        ) {
-            Ok(mutex_hdl) => {
-                if Win32Foundation::GetLastError() == Win32Foundation::ERROR_ALREADY_EXISTS {
-                    log::error!("Service is already running.");
-                } else {
-                    service_dispatcher::start(APP_NAME, ffi_service_main).expect("Failed to start service dispatcher");
-                    Win32Threading::ReleaseMutex(mutex_hdl).ok();
+        let mutex = 
+            match MutexGuard::new(Some(&sa), true, SERVICE_MUTEX_NAME_WIDE){
+                Ok(mutex) => mutex,
+                Err(e) => {
+                    log::error!("Failed to create mutex: {:?}", e);
+                    return;
                 }
-
-                Win32Foundation::CloseHandle(mutex_hdl).ok();
-            }
-            Err(e) => {
-                log::error!("Failed to create mutex: {:?}", e);
-            }
+            };
+        
+        if mutex.is_holding() {
+            service_dispatcher::start(APP_NAME, ffi_service_main)
+                .expect("Failed to start service dispatcher");
+        } else {
+            log::error!("Service is already running.");
         }
     }
 }
@@ -286,71 +364,69 @@ fn run_as_service(){
 
 
 
+fn start_service() -> Result<()> {
+    ServiceManager::local_computer(
+        None::<&str>, 
+        ServiceManagerAccess::CONNECT
+    )?.open_service(
+        APP_NAME, 
+        ServiceAccess::START
+    )?.start(&[OsStr::new("Started from Rust!")])?;
+    Ok(())
+}
 
+fn stop_service() -> Result<()> {
+    ServiceManager::local_computer(
+        None::<&str>, 
+        ServiceManagerAccess::CONNECT
+    )?.open_service(
+        APP_NAME, 
+        ServiceAccess::STOP
+    )?.stop()?;
+    Ok(())
+}
 
-
-define_windows_service!(ffi_service_main, service_main);
-fn service_main(arguments: Vec<std::ffi::OsString>) {
-    log::info!("Service started with arguments: {:?}", arguments);
-    if let Err(e) = run_service() {
-        log::error!("Service failed: {}", e);
+fn stop() -> Result<String> {
+    let mutex = MutexGuard::new(None, true, SERVICE_MUTEX_NAME_WIDE)?;
+    if mutex.is_holding() {
+        Err(Error::String("Service is not running.".to_string()))
+    } else {
+        unsafe {
+            Ok(String::from_utf8_unchecked(
+                pipe::send(STOPPED_PIPE_NAME_WIDE, b"stop")?
+            ))
+        }
     }
-
-}
-
-fn start() -> Result<()> {
-    let manager_access = ServiceManagerAccess::CONNECT;
-    let service_manager = ServiceManager::local_computer(None::<&str>, manager_access)?;
-
-    let service = service_manager.open_service(APP_NAME, ServiceAccess::START)?;
-
-    service.start(&[OsStr::new("Started from Rust!")])?;
-
-    Ok(())
-}
-
-fn stop() -> Result<()> {
-
-    let manager_access = ServiceManagerAccess::CONNECT;
-    let service_manager = ServiceManager::local_computer(None::<&str>, manager_access)?;
-
-    let service = service_manager.open_service(
-        APP_NAME,
-        ServiceAccess::STOP,
-    )?;
-
-    service.stop()?;
-
-    Ok(())
 }
 
 fn install() -> Result<()> {
 
-    let service_manager = ServiceManager::local_computer(
-        None::<&str>, 
-        ServiceManagerAccess::CONNECT | ServiceManagerAccess::CREATE_SERVICE
-    )?;
-
-    let service_binary_path = 
-        std::env::current_exe().map_err(
-            windows_service::Error::Winapi
-        )?;
     let service_info = ServiceInfo {
         name: OsString::from(APP_NAME),
         display_name: OsString::from(APP_NAME),
         service_type: ServiceType::OWN_PROCESS,
         start_type: ServiceStartType::AutoStart,
         error_control: ServiceErrorControl::Normal,
-        executable_path: service_binary_path,
-        launch_arguments: vec![OsString::from("--run-as-service")],
+        executable_path: std::env::current_exe().map_err(
+            windows_service::Error::Winapi
+        )?,
+        launch_arguments: vec![
+            OsString::from("setting"),
+            OsString::from("--run-as-service")
+        ],
         dependencies: vec![],
         account_name: None, // run as System
         account_password: None,
     };
 
-    let service = service_manager.create_service(&service_info, ServiceAccess::CHANGE_CONFIG)?;
+    ServiceManager::local_computer(
+        None::<&str>, 
+        ServiceManagerAccess::CONNECT | ServiceManagerAccess::CREATE_SERVICE
+    )?.create_service(
+        &service_info, 
+        ServiceAccess::CHANGE_CONFIG
+    )?.set_description("A Linux-like service manager")?;
 
-    service.set_description("A Linux-like service manager")?;
     Ok(())
 }
 
@@ -389,9 +465,27 @@ fn uninstall() -> Result<String> {
     Ok(format!("{} is marked for deletion.", APP_NAME))
 }
 
+fn register() -> Result<()> {
+
+
+    Ok(())
+}
+
+fn unregister() -> Result<()> {
+
+    Ok(())
+}
+
 
 static STATUS_HDL: OnceCell<ServiceStatusHandle> = OnceCell::new();
+define_windows_service!(ffi_service_main, service_main);
+fn service_main(arguments: Vec<std::ffi::OsString>) {
+    log::info!("Service started with arguments: {:?}", arguments);
+    if let Err(e) = run_service() {
+        log::error!("Service failed: {}", e);
+    }
 
+}
 fn run_service() ->  Result<()> {
 
     let event_handler = move |control_event| -> ServiceControlHandlerResult {
@@ -430,6 +524,36 @@ fn run_service() ->  Result<()> {
     });
 
     server::run();
+
+
+
+    mem::forget(thread::spawn(move || {
+        match wait_for_stop_signal() {
+            Ok(()) => {
+                log::info!("Received stop signal");
+            }
+            Err(e) => {
+                log::error!("Failed to listen on stop signal pipe: {:?}", e);
+            }
+        }
+        if let Some(status_handle) = STATUS_HDL.get() {
+            status_handle.set_service_status(ServiceStatus {
+                service_type: ServiceType::OWN_PROCESS,
+                current_state: ServiceState::Stopped,
+                controls_accepted: ServiceControlAccept::empty(),
+                exit_code: ServiceExitCode::Win32(0),
+                checkpoint: 0,
+                wait_hint: Duration::default(),
+                process_id: None,
+            }).unwrap_or_else(|e| {
+                log::error!("Failed to set service status: {:?}", e);
+            });
+            log::info!("Service stopped successfully.");
+        } else {
+            log::info!("Service stopped, but status handle is missing.");
+        }
+    }));
+
 
     // Tell the system that the service is running now
     if let Some(status_handle) = STATUS_HDL.get() {
