@@ -21,6 +21,7 @@ use windows::core::{PCWSTR, w};
 use windows::Win32::Foundation as Win32Foundation;
 use windows::Win32::System::Threading as Win32Threading;
 use windows::Win32::Security as Win32Security;
+use windows::Win32::System::Registry as Win32Registry;
 
 use windows::Win32::System::Console as Win32Console;
 
@@ -138,6 +139,7 @@ impl From<windows::core::Error> for Error {
     }
 }
 
+
 impl From<std::io::Error> for Error {
     fn from(e: std::io::Error) -> Self {
         Error::Io(e)
@@ -159,6 +161,7 @@ impl Display for Error {
 type Result<T> = std::result::Result<T, Error>;
 
 const APP_NAME: &str = "Systemd";
+const APP_NAME_WIDE: PCWSTR = w!("Systemd");
 
 const SERVICE_MUTEX_NAME_WIDE: PCWSTR = w!(r"Global\__{A7A4E39C-1F27-4A55-9C21-6831614E9461}__");
 
@@ -244,6 +247,12 @@ fn main() {
                     return;
                 } else if opt.uninstall {
                     println!("{:?}", uninstall());
+                    return;
+                } else if opt.register {
+                    println!("{:?}", register());
+                    return;
+                } else if opt.unregister {
+                    println!("{:?}", unregister());
                     return;
                 }
             },
@@ -465,14 +474,67 @@ fn uninstall() -> Result<String> {
     Ok(format!("{} is marked for deletion.", APP_NAME))
 }
 
+
+const RUN_SUBKEY: PCWSTR = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
+
+
 fn register() -> Result<()> {
+    unsafe {
+        let mut hkey = Win32Registry::HKEY::default();
+
+        Win32Registry::RegOpenKeyExW(
+            Win32Registry::HKEY_CURRENT_USER,
+            RUN_SUBKEY,
+            None,
+            Win32Registry::KEY_SET_VALUE,
+            &mut hkey,
+        ).ok()?;
+
+        let command = format!(
+            "powershell.exe -WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -Command \"& {{Start-Process -FilePath '{}' -ArgumentList 'setting --run-as-user' -WindowStyle Hidden}}\"",
+            std::env::current_exe()?.display()
+        );
 
 
+        let lpdata: Vec<u16>  = command.encode_utf16().collect();
+
+        let lpdata_bytes  = std::slice::from_raw_parts(
+            lpdata.as_ptr() as *const u8,
+            lpdata.len() * 2,
+        );
+
+        Win32Registry::RegSetValueExW(
+            hkey,
+            APP_NAME_WIDE,
+            None,   
+            Win32Registry::REG_SZ,
+            Some(lpdata_bytes),
+        ).ok()?;
+
+        Win32Registry::RegCloseKey(hkey).ok()?;
+    }
     Ok(())
 }
 
 fn unregister() -> Result<()> {
+    unsafe {
+        let mut hkey = Win32Registry::HKEY::default();
 
+        Win32Registry::RegOpenKeyExW(
+            Win32Registry::HKEY_CURRENT_USER,
+            RUN_SUBKEY,
+            None,
+            Win32Registry::KEY_SET_VALUE,
+            &mut hkey,
+        ).ok()?;
+
+        Win32Registry::RegDeleteValueW(
+            hkey,
+            APP_NAME_WIDE
+        ).ok()?;
+
+        Win32Registry::RegCloseKey(hkey).ok()?;
+    }
     Ok(())
 }
 
